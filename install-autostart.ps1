@@ -1,10 +1,16 @@
-# Install (or remove) the local autostart layers for both consumers.
+# Install (or remove) the distro-side units both consumers depend on.
 #
 #   $env:CLINE_TUNNEL_SERVER = '<relay host>'
 #   powershell -ExecutionPolicy Bypass -File install-autostart.ps1
+#   powershell -ExecutionPolicy Bypass -File install-autostart.ps1 -AtLogon
 #   powershell -ExecutionPolicy Bypass -File install-autostart.ps1 -Remove
 #
-# This is the only entry point. Nothing else has to be run.
+# By default the model is on-demand: nothing is registered to run at logon, and
+# opening an application is what starts the stack it needs. This script sets up
+# the parts an application's launcher then drives -- the ssh key, the forward to
+# the relay's shim, and the OpenAI4S service. Pass -AtLogon to additionally put
+# the two Windows-side supervisors in the Startup folder, which pre-warms both
+# stacks instead.
 #
 # There are two consumers, they live on different sides of the WSL boundary, and
 # neither depends on the other:
@@ -43,6 +49,10 @@
 
 param(
     [switch]$Remove,
+    # Off by default. The intended model is on-demand: nothing runs until an
+    # application is opened, and each application's own launcher brings its
+    # stack up. Pass this only if you want both stacks already warm at logon.
+    [switch]$AtLogon,
     [string]$Distro = 'Ubuntu',
     [string]$Server = '',
     [string]$TunnelUser = '',
@@ -192,30 +202,40 @@ Invoke-Wsl -AsRoot -Command "systemctl disable --now cline-shim.service 2>/dev/n
 Write-Host "autostart: retired cline-shim.service removed"
 Write-Host "autostart: enabled -> $(Invoke-Wsl -AsRoot -Command 'systemctl is-enabled cline-shim-tunnel.service openai4s.service' | Out-String | ForEach-Object { $_.Trim() })"
 
-# --- layer 2: the Windows-side supervisors, via the Startup folder ----------
-Write-StartupLauncher -Name 'cline-shim-tunnel' -ScriptPath (Join-Path $SrcDir 'tunnel-shim.ps1') `
-    -EnvBlock @"
+# --- layer 2: the Windows-side supervisors ----------------------------------
+#
+# Raising the tunnel and the distro keeper is normally done by the applications'
+# own launchers, so that opening an app is what starts its stack. Installing the
+# Startup shortcuts is therefore opt-in: it pre-warms both at logon instead.
+if ($AtLogon) {
+    Write-StartupLauncher -Name 'cline-shim-tunnel' -ScriptPath (Join-Path $SrcDir 'tunnel-shim.ps1') `
+        -EnvBlock @"
 ' The relay host is per-machine, so it is written here instead of being
 ' defaulted inside the script -- tunnel-shim.ps1 refuses to start without it,
 ' and this repository is public.
 Set shell = CreateObject("WScript.Shell")
 shell.Environment("Process")("CLINE_TUNNEL_SERVER") = "$Server"
 "@ `
-    -Body @"
+        -Body @"
 ' dsh reaches the relay's shim through this forward. It does not touch the distro.
 "@
 
-Write-StartupLauncher -Name 'wsl-keepalive' -ScriptPath (Join-Path $SrcDir 'wsl-keepalive.ps1') `
-    -Body @"
+    Write-StartupLauncher -Name 'wsl-keepalive' -ScriptPath (Join-Path $SrcDir 'wsl-keepalive.ps1') `
+        -Body @"
 ' Holds a wsl.exe client so the distro -- and the two units inside it -- stay up.
 "@
+} else {
+    Write-Host 'autostart: no Startup shortcuts installed (on-demand model)'
+    Write-Host 'autostart: opening an application starts its stack; pass -AtLogon to pre-warm both'
+}
 
-# Start both now so the install is usable without a logout.
+# Raise them now regardless, so the end-to-end check below is meaningful.
+$env:CLINE_TUNNEL_SERVER = $Server
 foreach ($script in @('tunnel-shim.ps1', 'wsl-keepalive.ps1')) {
     Start-Process powershell -ArgumentList '-NoProfile', '-WindowStyle', 'Hidden',
         '-ExecutionPolicy', 'Bypass', '-File', (Join-Path $SrcDir $script) -WindowStyle Hidden
 }
-Write-Host "autostart: both supervisors started"
+Write-Host 'autostart: both supervisors running'
 
 Start-Sleep -Seconds 12
 Write-Host ""

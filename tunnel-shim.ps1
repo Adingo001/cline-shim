@@ -47,44 +47,69 @@ if (-not $mutex.WaitOne(0)) {
 
 Write-Log "supervisor start: ${LocalPort} -> ${Server}:${RemotePort} as ${User}"
 
-while ($true) {
-    $sshArgs = @(
-        '-N'
-        '-L', "${LocalPort}:127.0.0.1:${RemotePort}"
-        "${User}@${Server}"
-        '-o', 'ServerAliveInterval=30'
-        '-o', 'ServerAliveCountMax=3'
-        '-o', 'ExitOnForwardFailure=yes'
-        '-o', 'BatchMode=yes'
-        '-o', 'ConnectTimeout=20'
-        '-o', 'StrictHostKeyChecking=accept-new'
-    )
-
-    $proc = Start-Process -FilePath 'ssh.exe' -ArgumentList $sshArgs -PassThru -WindowStyle Hidden
-    Write-Log "ssh started (pid $($proc.Id))"
-
-    # Watch the tunnel rather than trusting the process: ssh can stay alive
-    # while the forward has already failed. A loopback probe is the only
-    # honest health check.
-    while (-not $proc.HasExited) {
-        Start-Sleep -Seconds 30
-        $proc.Refresh()
-        if ($proc.HasExited) { break }
-
-        try {
-            $resp = Invoke-WebRequest -Uri "http://127.0.0.1:$LocalPort/health" `
-                -TimeoutSec 10 -UseBasicParsing -ErrorAction Stop
-            if ($resp.StatusCode -ne 200) {
-                Write-Log "health returned $($resp.StatusCode); restarting tunnel"
-                $proc.Kill(); break
-            }
-        } catch {
-            Write-Log "health failed: $($_.Exception.Message); restarting tunnel"
-            try { $proc.Kill() } catch { }
-            break
+# A supervisor that is killed outright, rather than asked to stop, leaves its
+# ssh behind -- and that orphan keeps holding the port. Windows lets a second
+# ssh bind anyway when the two land on different address families, so this does
+# not fail loudly; it just leaks one process per hard kill. Reap any ssh whose
+# parent is gone before claiming the port for ours.
+Get-CimInstance Win32_Process -Filter "Name='ssh.exe'" -ErrorAction SilentlyContinue |
+    Where-Object { $_.CommandLine -match "-L ${LocalPort}:" } |
+    ForEach-Object {
+        $parentAlive = Get-CimInstance Win32_Process -Filter "ProcessId=$($_.ParentProcessId)" -ErrorAction SilentlyContinue
+        if (-not $parentAlive) {
+            Write-Log "reaping orphaned ssh (pid $($_.ProcessId)) holding $LocalPort"
+            Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue
         }
     }
 
-    Write-Log "ssh exited; retrying in ${RetrySecs}s"
-    Start-Sleep -Seconds $RetrySecs
+$proc = $null
+try {
+    while ($true) {
+        $sshArgs = @(
+            '-N'
+            '-L', "${LocalPort}:127.0.0.1:${RemotePort}"
+            "${User}@${Server}"
+            '-o', 'ServerAliveInterval=30'
+            '-o', 'ServerAliveCountMax=3'
+            '-o', 'ExitOnForwardFailure=yes'
+            '-o', 'BatchMode=yes'
+            '-o', 'ConnectTimeout=20'
+            '-o', 'StrictHostKeyChecking=accept-new'
+        )
+
+        $proc = Start-Process -FilePath 'ssh.exe' -ArgumentList $sshArgs -PassThru -WindowStyle Hidden
+        Write-Log "ssh started (pid $($proc.Id))"
+
+        # Watch the tunnel rather than trusting the process: ssh can stay alive
+        # while the forward has already failed. A loopback probe is the only
+        # honest health check.
+        while (-not $proc.HasExited) {
+            Start-Sleep -Seconds 30
+            $proc.Refresh()
+            if ($proc.HasExited) { break }
+
+            try {
+                $resp = Invoke-WebRequest -Uri "http://127.0.0.1:$LocalPort/health" `
+                    -TimeoutSec 10 -UseBasicParsing -ErrorAction Stop
+                if ($resp.StatusCode -ne 200) {
+                    Write-Log "health returned $($resp.StatusCode); restarting tunnel"
+                    $proc.Kill(); break
+                }
+            } catch {
+                Write-Log "health failed: $($_.Exception.Message); restarting tunnel"
+                try { $proc.Kill() } catch { }
+                break
+            }
+        }
+
+        Write-Log "ssh exited; retrying in ${RetrySecs}s"
+        Start-Sleep -Seconds $RetrySecs
+    }
+} finally {
+    # Leaving the child behind is what creates the orphan this script reaps on
+    # the next start, so do not create one on the way out.
+    if ($proc -and -not $proc.HasExited) {
+        try { $proc.Kill() } catch { }
+        Write-Log "supervisor exiting; ssh (pid $($proc.Id)) stopped"
+    }
 }

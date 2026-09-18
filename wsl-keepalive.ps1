@@ -41,44 +41,65 @@ if (-not $mutex.WaitOne(0)) {
 
 Write-Log "supervisor start for distro $Distro"
 
-while ($true) {
-    $proc = Start-Process -FilePath 'wsl.exe' `
-        -ArgumentList @('-d', $Distro, '--', 'sleep', 'infinity') `
-        -PassThru -WindowStyle Hidden
-    Write-Log "wsl.exe started (pid $($proc.Id))"
-
-    # sleep infinity never returns while the distro lives, so this loop is
-    # normally silent. The port probe catches the case where the client is still
-    # attached but the distro's services failed to come up -- worth rebooting
-    # the distro for rather than waiting on a half-dead state.
-    $missedProbes = 0
-    while (-not $proc.HasExited) {
-        Start-Sleep -Seconds 30
-        $proc.Refresh()
-        if ($proc.HasExited) { break }
-
-        $alive = $false
-        try {
-            $client = New-Object System.Net.Sockets.TcpClient
-            $alive = $client.ConnectAsync('127.0.0.1', [int]$ProbePort).Wait(5000)
-            $client.Close()
-        } catch { $alive = $false }
-
-        if ($alive) {
-            $missedProbes = 0
-        } else {
-            $missedProbes++
-            Write-Log "port $ProbePort probe failed ($missedProbes/3)"
-            # A single miss can just be a service restarting; three in a row
-            # means the distro is not healthy and is worth recycling.
-            if ($missedProbes -ge 3) {
-                Write-Log "port $ProbePort unreachable; recycling the distro client"
-                try { $proc.Kill() } catch { }
-                break
-            }
+# A supervisor that is killed outright leaves its wsl.exe behind, and that
+# orphan keeps holding the distro up -- which is the opposite of what stopping
+# the supervisor is meant to achieve. Reap any client whose parent is gone.
+Get-CimInstance Win32_Process -Filter "Name='wsl.exe'" -ErrorAction SilentlyContinue |
+    Where-Object { $_.CommandLine -match "-d $Distro " } |
+    ForEach-Object {
+        $parentAlive = Get-CimInstance Win32_Process -Filter "ProcessId=$($_.ParentProcessId)" -ErrorAction SilentlyContinue
+        if (-not $parentAlive) {
+            Write-Log "reaping orphaned wsl.exe (pid $($_.ProcessId))"
+            Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue
         }
     }
 
-    Write-Log "wsl.exe exited; retrying in ${RetrySecs}s"
-    Start-Sleep -Seconds $RetrySecs
+$proc = $null
+try {
+    while ($true) {
+        $proc = Start-Process -FilePath 'wsl.exe' `
+            -ArgumentList @('-d', $Distro, '--', 'sleep', 'infinity') `
+            -PassThru -WindowStyle Hidden
+        Write-Log "wsl.exe started (pid $($proc.Id))"
+
+        # sleep infinity never returns while the distro lives, so this loop is
+        # normally silent. The port probe catches the case where the client is still
+        # attached but the distro's services failed to come up -- worth rebooting
+        # the distro for rather than waiting on a half-dead state.
+        $missedProbes = 0
+        while (-not $proc.HasExited) {
+            Start-Sleep -Seconds 30
+            $proc.Refresh()
+            if ($proc.HasExited) { break }
+
+            $alive = $false
+            try {
+                $client = New-Object System.Net.Sockets.TcpClient
+                $alive = $client.ConnectAsync('127.0.0.1', [int]$ProbePort).Wait(5000)
+                $client.Close()
+            } catch { $alive = $false }
+
+            if ($alive) {
+                $missedProbes = 0
+            } else {
+                $missedProbes++
+                Write-Log "port $ProbePort probe failed ($missedProbes/3)"
+                # A single miss can just be a service restarting; three in a row
+                # means the distro is not healthy and is worth recycling.
+                if ($missedProbes -ge 3) {
+                    Write-Log "port $ProbePort unreachable; recycling the distro client"
+                    try { $proc.Kill() } catch { }
+                    break
+                }
+            }
+        }
+
+        Write-Log "wsl.exe exited; retrying in ${RetrySecs}s"
+        Start-Sleep -Seconds $RetrySecs
+    }
+} finally {
+    if ($proc -and -not $proc.HasExited) {
+        try { $proc.Kill() } catch { }
+        Write-Log "supervisor exiting; wsl.exe (pid $($proc.Id)) stopped"
+    }
 }

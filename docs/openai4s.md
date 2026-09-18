@@ -86,18 +86,18 @@ scratch. WSL2 tears a distro down once no `wsl.exe` client is attached and it
 has been idle, and a running systemd inside does not prevent that, because the
 whole VM goes away.
 
-So something on the Windows side has to hold a client attached. Two approaches
-were tried and only one works:
+So something on the Windows side has to hold a client attached, and it has to be
+started in a way that outlives the shell that starts it. Measured on this
+machine: a child started with `Start-Process` **does** survive its parent exiting.
+The tunnel supervisor runs under exactly that arrangement — its parent is gone
+and it is still serving. An earlier revision of this page asserted the opposite;
+that was wrong, and nothing in the design depends on it.
 
-| Approach | Result |
-| --- | --- |
-| `Start-Process wsl.exe -d Ubuntu -- sleep infinity` | **fails** — the client is torn down with the launching shell, which removes the last attached client and triggers the very shutdown it was meant to prevent |
-| a supervisor that owns the client and restarts it | **works** — the client outlives every shell, and a teardown is recovered automatically |
-
-`wsl-keepalive.ps1` is that supervisor. It holds one
-`wsl.exe -d Ubuntu -- sleep infinity` client, probes `127.0.0.1:8760` every 30
-seconds, and recycles the distro after three consecutive misses. A per-distro
-mutex keeps a logon shortcut and a manual run from fighting over restarts.
+`wsl-keepalive.ps1` holds one `wsl.exe -d Ubuntu -- sleep infinity` client,
+probes `127.0.0.1:8760` every 30 seconds, and recycles the distro after three
+consecutive misses. A per-distro mutex keeps two supervisors from fighting over
+restarts, and a supervisor that is killed outright has its orphaned client reaped
+by the next one to start.
 
 Measured, with the supervisor in place and `wsl --shutdown` used to tear the
 distro down underneath it:
@@ -112,23 +112,33 @@ distro down underneath it:
 The distro came back on its own, and with it both units — `active`, with 8760
 answering (401, token required) and 8788 returning 200 at `pin_mode: strict`.
 
-## Two Startup entries, for two independent consumers
+## Nothing runs until an application is opened
 
-A cold boot has to leave **both** consumers working, and they do not depend on
-each other:
+Both consumers are started on demand. Nothing is registered to run at logon, and
+each one's own launcher is what makes it usable the moment it is opened:
 
-| File in `Startup` | Launches | Serves |
+| Opened | Launcher | Brings up |
 | --- | --- | --- |
-| `cline-shim-tunnel.vbs` | `tunnel-shim.ps1` | dsh, on Windows, via `127.0.0.1:8789` |
-| `wsl-keepalive.vbs` | `wsl-keepalive.ps1` | WSL itself, so the distro's units can run |
+| DeepSeek Harness (`dsh`) | `dsh.cmd` | `tunnel-shim.ps1`, then the app — the app talks to `127.0.0.1:8789`, which is that forward |
+| OpenAI4S (`OpenAI4S.lnk`) | `openai4s.ps1 start` | the distro, both units, and `wsl-keepalive.ps1` |
 
-Removing the second costs dsh nothing — dsh never touches the distro. It costs
-the OpenAI4S side everything: with no client attached the distro stops, taking
-`openai4s.service` and `cline-shim-tunnel.service` with it.
+`openai4s.ps1 stop` releases the keep-alive first and then stops the units, so
+the distro is free to idle out — which is the point of stopping.
 
-The Startup folder is used rather than Task Scheduler because
+Both launchers are outside this repository, because both hardcode a home
+directory and one carries the relay host. What is here is the machinery they
+drive.
+
+**`openai4s.ps1` used to start a shim inside the distro on 8788.** It must not
+any more: the shim lives on the relay, and 8788 in the distro is the forward to
+it — a second listener there fights the forward for the port. Its `start` action
+now starts the two units instead, and its sync step copies only the two helpers
+that still shape the application (`patch-openai4s.sh`, `detect-fake-ip.sh`)
+rather than the shim's own files.
+
+The Startup folder is not used, and neither is Task Scheduler:
 `schtasks /create /sc onlogon` needs administrator rights and this account has
-none; the Startup folder is per-user and needs no elevation.
+none, and in any case a logon trigger is the opposite of on-demand.
 
 ## Environment selection
 
