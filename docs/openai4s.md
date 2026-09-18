@@ -16,9 +16,11 @@ git ignores — **a fresh clone will not contain them**. If you still deploy
 OpenAI4S with them, keep that directory somewhere safe; this repository is no
 longer a complete description of that install.
 
-The shim stays in the distro precisely because this install still runs there:
-one instance serves dsh on Windows and OpenAI4S inside the distro. See
-[Why the shim runs inside WSL](../README.md#why-the-shim-runs-inside-wsl).
+The distro no longer runs a shim. The shim lives on a Linux relay and every
+consumer tunnels to it — see [Where the shim runs](../README.md#where-the-shim-runs).
+What the distro runs instead is `cline-shim-tunnel.service`, an ssh forward
+from its loopback 8788 to the relay's, which is why `OPENAI4S_LLM_BASE_URL`
+still reads `http://127.0.0.1:8788` and needed no change.
 
 ## Why OpenAI4S runs under WSL
 
@@ -28,31 +30,54 @@ bubblewrap / Seatbelt sandbox backend. `openai4s/platform_support.py` accepts
 only `darwin` and `linux` prefixes and raises `UnsupportedPlatform` on native
 Windows, so the daemon runs in the Ubuntu WSL2 distro.
 
-This is also why the shim lands in WSL rather than on Windows: it is one process
-among the others already there, and the VM keeper that keeps it alive is the
-same one the daemon needs.
+The distro also carries the forward to the relay's shim, as
+`cline-shim-tunnel.service`. That is an ordinary systemd unit, so it comes back
+with the distro and needs no supervisor of its own.
 
-## Why a scheduled task
+## Why a scheduled task, and whether it is still needed
 
-WSL2 tears its VM down once no `wsl.exe` client is attached, and that teardown
-kills every process inside it — including a `serve --detached` daemon. The
-default `vmIdleTimeout` is 60 seconds, so an idle session loses both services
-about a minute after you stop interacting with it.
+The `Cline shim` task that `install-autostart.ps1` registers runs
+`wsl.exe -d Ubuntu -- sleep infinity` on logon. It was written to hold the
+distro up, on the reasoning that WSL2 tears its VM down once no `wsl.exe` client
+is attached — default `vmIdleTimeout` 60 seconds — killing every process inside,
+including a `serve --detached` daemon. A keep-alive child started with
+`Start-Process` would not survive, since it dies with the launching PowerShell;
+owned by Task Scheduler, the client outlives every shell the launcher opens.
 
-A keep-alive child started with `Start-Process` does not survive: it is torn
-down together with the launching PowerShell, which removes the last attached
-client. Owned by Task Scheduler instead, the `wsl.exe` client outlives every
-shell the launcher opens.
+**That reasoning no longer holds here, and the keep-alive holds nothing up.**
+Measured: the keep-alive process was killed and the machine left alone for 100
+seconds. The distro stayed up (`PID 1 = systemd`, `systemctl is-system-running`
+reported `running`), the tunnel unit stayed `active`, and the distro's
+`127.0.0.1:8788` still answered `/health` with 200.
 
-The old launcher registered an `OpenAI4S keepalive` task and touched
-`~/.openai4s/.keepalive`; `stop` removed the lock, stopped the task and
-unregistered it. Measured: 150 seconds of complete silence left the VM boot time
-unchanged and both ports listening.
+The cause is `/etc/wsl.conf`:
 
-The `Cline shim` task that `install-autostart.ps1` registers is a deliberately
-separate, machine-level setting: `openai4s.cmd stop` unregistered its own task,
-and this one has to survive that. Removing the task does not stop the shim — use
-`ctl.sh stop` for that.
+```ini
+[boot]
+systemd=true
+```
+
+With systemd as PID 1 a process always exists in the distro, so the idle
+teardown the task was written against never fires. The 60-second behaviour
+belongs to a distro **without** systemd, where the last `wsl.exe` client exiting
+really does end the session.
+
+That leaves the task's **logon trigger**, which starts the distro after a
+Windows reboot. That is optional too:
+
+- **dsh** runs on Windows and reaches the relay through its own tunnel. It never
+  touches the distro.
+- **OpenAI4S** is launched by `./start.sh` from a shell, which starts the distro
+  on demand; `cline-shim-tunnel.service` is `enabled`, so systemd brings the
+  forward up along with it.
+
+Removing the task therefore costs nothing on this install; it is kept only
+because a distro already running at logon makes the first OpenAI4S launch
+marginally faster.
+
+The task stays deliberately separate from OpenAI4S's own launcher, which
+unregistered its `OpenAI4S keepalive` task on `stop`; this one has to survive
+that.
 
 ## Environment selection
 
@@ -136,8 +161,10 @@ The application lives in the WSL distro, not on a Windows drive:
 | Path (WSL) | Contents |
 | --- | --- |
 | `~/openai4s` | OpenAI4S checkout + `.venv` control plane |
-| `~/openai4s-shim` | `shim.py`, `ctl.sh`, `autostart.sh`, logs, plus the `_verify.sh` / `_diag.sh` / `_heal_test.sh` checkers |
-| `/etc/systemd/system/cline-shim.service` | unit that supervises the shim (`Restart=always`) and starts it at distro boot |
+| `~/openai4s-shim` | `shim.py`, `ctl.sh`, `autostart.sh`, logs and the `_verify.sh` / `_diag.sh` / `_heal_test.sh` checkers — **no longer running**; kept only so the old install can be revived |
+| `/etc/systemd/system/cline-shim.service` | the retired shim supervisor (`inactive`, `disabled`) |
+| `/etc/systemd/system/cline-shim-tunnel.service` | forwards the distro's `127.0.0.1:8788` to the relay's shim (`Restart=always`, enabled at boot) |
+| `~/.ssh/relay_shim` | the key that tunnel authenticates with |
 | `~/.mamba` | Python 3.11 and R 4.5.3 kernel environments |
 | `~/.openai4s` | Daemon data directory |
 

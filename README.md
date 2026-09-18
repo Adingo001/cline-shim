@@ -218,30 +218,29 @@ one and a steady 1.4s beats a variable 1.5–4s.
 one request (no tokens — the router fails before generating) to have the
 gateway name its own channels, and caches the answer for an hour.
 
-## Why the shim runs inside WSL
+## Where the shim runs
 
 `shim.py` itself has no POSIX dependency. It imports `json`, `os`, `re`, `sys`,
 `time`, `urllib` and `http.server`, and `main()` is a `ThreadingHTTPServer`
-bound to `127.0.0.1`. It would run on Windows unchanged.
+bound to `127.0.0.1`. It runs unchanged on Windows, inside a distro, or on a
+Linux host.
 
-It lives in the distro because that is where the other consumer is. OpenAI4S
-needs `start_new_session=True`, a per-cell process group with exact `SIGINT`,
-and a bubblewrap sandbox backend, so it only runs under Linux — the shim was
-written for it and stayed there. One instance then serves both:
+Because it binds loopback, **each consumer needs its own path to it**. That
+path, not the shim, is what determines the deployment shape:
 
-| Consumer | Runs on | Reaches the shim at |
+| Shim runs on | dsh reaches it via | OpenAI4S reaches it via |
 | --- | --- | --- |
-| dsh | Windows | `127.0.0.1:8788`, through WSL2's localhost forwarding |
-| OpenAI4S | inside the distro | `127.0.0.1:8788`, directly |
+| a Linux relay | an SSH tunnel from Windows | an SSH tunnel from inside the distro |
+| inside the distro | WSL2 localhost forwarding | directly, same distro |
+| Windows | directly | an SSH tunnel, or it is not reachable |
 
-That is also why the shim binds loopback only. A Windows-native shim would not
-be reachable from inside the distro without binding `0.0.0.0`, which would turn
-it into an open relay for anyone on the LAN holding a key of their own.
+A distro is needed at all because **OpenAI4S** requires Linux
+(`start_new_session=True`, a per-cell process group with exact `SIGINT`, a
+bubblewrap sandbox backend), not because the shim does. Remove OpenAI4S from
+the picture and either remaining row works, taking the whole WSL layer with it.
 
-If the OpenAI4S install ever goes away, this whole WSL layer stops being
-necessary: `shim.py` runs on Windows as-is, a user-level scheduled task can own
-it — no administrator rights, no `wsl -u root` — and the VM keeper, the systemd
-unit and the 30-second supervisor loop all disappear together.
+Binding loopback is not incidental. A shim bound to `0.0.0.0` would be an open
+relay for anyone on the LAN holding a key of their own.
 
 ## Running the shim on a relay instead
 
