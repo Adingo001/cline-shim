@@ -1,0 +1,27 @@
+# Debug probes and one-off analysis scripts.
+#
+# These were used to measure the upstream while building the shim. Most of them
+# carry a live gateway token in plaintext, so they stay local and out of the
+# published tree.
+tests/_probe*.py
+tests/_probe*.sh
+tests/_ctx_*.py
+tests/_e2e.py
+tests/_smoke.py
+tests/_stream_smoke.py
+tests/_models.sh
+
+# Session notes -- working documents, not documentation.
+SESSION-*.md
+
+# Superseded by install-autostart.ps1, which installs both layers at once.
+tests/_install_service.py
+
+# Runtime artifacts.
+*.log
+*.pid
+__pycache__/
+*.pyc
+
+# Editorial backups.
+*.bak

@@ -1,0 +1,10 @@
+# Shell scripts must keep LF. A CRLF checkout breaks bash inside WSL with
+# "$'\r': command not found", which is easy to misread as a bad script.
+*.sh   text eol=lf
+*.py   text eol=lf
+*.md   text eol=lf
+.gitignore text eol=lf
+
+# The Windows-side launchers are the other way round.
+*.ps1  text eol=crlf
+*.cmd  text eol=crlf
