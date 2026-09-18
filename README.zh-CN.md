@@ -218,6 +218,60 @@ parasail, alibaba, runware, boundless, gmicloud`：测量时干净应答的那�
 上，一个用户级计划任务就能持有它（不需要管理员权限，不需要 `wsl -u root`），而
 VM 保活任务、systemd unit 和那个 30 秒循环会一起消失。
 
+## 把 shim 放到中转服务器上
+
+`shim.py` 并不绑定 WSL。在一台 Linux 中转服务器上，它只需要一个文件加一个
+systemd unit —— 没有 VM 保活任务，没有 `wsl -u root`，也没有那个 30 秒循环，
+因为那边的 systemd 是原生的：
+
+```ini
+[Unit]
+Description=Cline shim (pinned Cline Pass adapter on 127.0.0.1:8788)
+# 只绑回环：刻意不加 network-online.target，它在 DNS/路由不健康时会让 unit 无限阻塞。
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/cline-shim
+Environment=CLINE_SHIM_PIN_MODE=strict
+ExecStart=/usr/bin/python3 /opt/cline-shim/shim.py
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+```
+
+shim 只绑回环，所以从别的机器访问它必须走隧道。`tunnel-shim.ps1` 负责维持这条
+隧道，健康检查失败就重建；它带一个按端口加锁的互斥量，避免启动项和手动运行去
+抢同一个本地端口：
+
+```powershell
+$env:CLINE_TUNNEL_SERVER = '<中转服务器地址>'
+Start-Process powershell -ArgumentList '-NoProfile','-WindowStyle','Hidden',
+  '-ExecutionPolicy','Bypass','-File','D:\project\cline-shim\tunnel-shim.ps1' -WindowStyle Hidden
+```
+
+`CLINE_TUNNEL_SERVER` 没有默认值：中转服务器地址是部署相关的东西，而这个仓库是公开的。
+其余用 `CLINE_TUNNEL_USER`（默认 `root`）、`CLINE_TUNNEL_LPORT`（默认 `8789`）、
+`CLINE_TUNNEL_RPORT`（默认 `8788`）覆盖。
+
+同一个 prompt、每条路 5 轮、交错执行的实测结果（交错是为了不让上游随时间的
+波动算到恰好跑在坏窗口的那条路上）：
+
+| 路径 | ttfb 中位 | ttfb 范围 | total 中位 | tps |
+| --- | --- | --- | --- | --- |
+| 本地 WSL shim（8788） | **1.22s** | 1.04–1.45s | **3.32s** | 83.9 |
+| 隧道连中转 shim（8789） | 1.79s | 1.14–2.14s | 3.64s | 113.6 |
+| 直连（无 shim） | 2.16s | 1.75–3.19s | 6.01s | **45.4** |
+
+两条 shim 路径在**每一轮**都赢直连。直连那条路更大的离散度（ttfb 1.75–3.19s，
+其中一轮 11.73s）正是没有 pin 的样子：网关每个请求各自挑 channel，有些挑得很差。
+
+**路径约定。** shim 的 `CLINE_UPSTREAM` 已经带 `/v1`，所以调用方**不能**自己再加
+这个前缀。往 `/v1/chat/completions` 发请求，等于让上游收到
+`/api/v1/v1/chat/completions`，会在每一个 channel 上返回 404 —— 而 shim 会尽职地
+把八个 channel 全部轮一遍才放弃。
+
 ## 怎么让它一直活着
 
 两个事实让"启动一下就行"不成立：

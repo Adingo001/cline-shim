@@ -243,6 +243,65 @@ necessary: `shim.py` runs on Windows as-is, a user-level scheduled task can own
 it — no administrator rights, no `wsl -u root` — and the VM keeper, the systemd
 unit and the 30-second supervisor loop all disappear together.
 
+## Running the shim on a relay instead
+
+`shim.py` is not tied to WSL. On a Linux relay it needs one file and one
+systemd unit — no VM keeper, no `wsl -u root`, and no 30-second supervisor
+loop, because systemd is native there:
+
+```ini
+[Unit]
+Description=Cline shim (pinned Cline Pass adapter on 127.0.0.1:8788)
+# Loopback-only: deliberately no network-online.target, which blocks a unit
+# indefinitely when DNS or routing is unhealthy.
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/cline-shim
+Environment=CLINE_SHIM_PIN_MODE=strict
+ExecStart=/usr/bin/python3 /opt/cline-shim/shim.py
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+```
+
+Because the shim binds loopback, reaching it from another machine means a
+tunnel. `tunnel-shim.ps1` keeps one open and re-establishes it whenever the
+health probe fails; it holds a per-port mutex so a Startup shortcut and a
+manual run cannot fight over the same local port:
+
+```powershell
+$env:CLINE_TUNNEL_SERVER = '<relay host>'
+Start-Process powershell -ArgumentList '-NoProfile','-WindowStyle','Hidden',
+  '-ExecutionPolicy','Bypass','-File','D:\project\cline-shim\tunnel-shim.ps1' -WindowStyle Hidden
+```
+
+`CLINE_TUNNEL_SERVER` has no default: the relay host is deployment-specific and
+this repository is public. `CLINE_TUNNEL_USER` (default `root`),
+`CLINE_TUNNEL_LPORT` (default `8789`) and `CLINE_TUNNEL_RPORT` (default `8788`)
+override the rest.
+
+Measured on one prompt, five rounds per route, interleaved so that upstream
+drift could not be charged to whichever route happened to run in a bad window:
+
+| route | ttfb median | ttfb range | total median | tps |
+| --- | --- | --- | --- | --- |
+| local WSL shim (8788) | **1.22s** | 1.04–1.45s | **3.32s** | 83.9 |
+| relay shim over tunnel (8789) | 1.79s | 1.14–2.14s | 3.64s | 113.6 |
+| direct, no shim | 2.16s | 1.75–3.19s | 6.01s | **45.4** |
+
+Both shim routes beat the direct route in **every** round. The direct route's
+spread (ttfb 1.75–3.19s, one round at 11.73s) is what unpinned routing looks
+like: the gateway picks a channel per request, and some picks are bad.
+
+**Path contract.** The shim's `CLINE_UPSTREAM` already ends in `/v1`, so
+callers must **not** add that prefix themselves. Posting to `/v1/chat/completions`
+asks the upstream for `/api/v1/v1/chat/completions` and returns 404 on every
+channel — the shim will then dutifully fail over through all eight of them
+before giving up.
+
 ## Keeping the shim up
 
 Two facts make "just start it" insufficient:
