@@ -195,6 +195,29 @@ parasail, alibaba, runware, boundless, gmicloud`：测量时干净应答的那�
 `/channels` 默认返回内置顺序。加上 `&discover=1` 会花一次请求（不消耗 token ——
 路由器在生成前就失败了）让网关自己报出它的 channel，并把结果缓存一小时。
 
+## 为什么 shim 跑在 WSL 里
+
+`shim.py` 本身没有任何 POSIX 依赖。它 import 的是 `json`、`os`、`re`、`sys`、
+`time`、`urllib` 和 `http.server`，`main()` 就是一个绑在 `127.0.0.1` 上的
+`ThreadingHTTPServer`。它原样就能在 Windows 上跑。
+
+它住在发行版里，是因为**另一个消费者在那里**。OpenAI4S 需要
+`start_new_session=True`、带精确 `SIGINT` 的 per-cell 进程组，以及 bubblewrap
+沙箱后端，所以它只能在 Linux 下跑 —— shim 当初就是为它写的，也就留在了那里。
+于是**一个实例同时服务两边**：
+
+| 消费者 | 运行在 | 访问 shim 的方式 |
+| --- | --- | --- |
+| dsh | Windows | `127.0.0.1:8788`，经 WSL2 的 localhost 转发 |
+| OpenAI4S | 发行版内 | `127.0.0.1:8788`，直连 |
+
+这也是 shim 只绑回环的另一个原因。Windows 原生的 shim 要不绑 `0.0.0.0` 就无法
+从发行版内部访问，而那会把它变成一个开放中继 —— 局域网里任何自带 key 的人都能用。
+
+如果哪天 OpenAI4S 那套不用了，这整层 WSL 就不再必要：`shim.py` 原样跑在 Windows
+上，一个用户级计划任务就能持有它（不需要管理员权限，不需要 `wsl -u root`），而
+VM 保活任务、systemd unit 和那个 30 秒循环会一起消失。
+
 ## 怎么让它一直活着
 
 两个事实让"启动一下就行"不成立：

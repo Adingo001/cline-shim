@@ -11,6 +11,15 @@ machinery was split out: `openai4s.ps1`, `openai4s.cmd`, `patch-openai4s.sh`,
 `keepalive.sh` and `detect-fake-ip.sh`. This page records what those pieces did
 and why, for anyone reviving that install.
 
+Those five files are kept on disk beside this checkout under `_legacy/`, which
+git ignores — **a fresh clone will not contain them**. If you still deploy
+OpenAI4S with them, keep that directory somewhere safe; this repository is no
+longer a complete description of that install.
+
+The shim stays in the distro precisely because this install still runs there:
+one instance serves dsh on Windows and OpenAI4S inside the distro. See
+[Why the shim runs inside WSL](../README.md#why-the-shim-runs-inside-wsl).
+
 ## Why OpenAI4S runs under WSL
 
 OpenAI4S needs POSIX process primitives that Windows does not expose:

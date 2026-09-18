@@ -218,6 +218,31 @@ one and a steady 1.4s beats a variable 1.5–4s.
 one request (no tokens — the router fails before generating) to have the
 gateway name its own channels, and caches the answer for an hour.
 
+## Why the shim runs inside WSL
+
+`shim.py` itself has no POSIX dependency. It imports `json`, `os`, `re`, `sys`,
+`time`, `urllib` and `http.server`, and `main()` is a `ThreadingHTTPServer`
+bound to `127.0.0.1`. It would run on Windows unchanged.
+
+It lives in the distro because that is where the other consumer is. OpenAI4S
+needs `start_new_session=True`, a per-cell process group with exact `SIGINT`,
+and a bubblewrap sandbox backend, so it only runs under Linux — the shim was
+written for it and stayed there. One instance then serves both:
+
+| Consumer | Runs on | Reaches the shim at |
+| --- | --- | --- |
+| dsh | Windows | `127.0.0.1:8788`, through WSL2's localhost forwarding |
+| OpenAI4S | inside the distro | `127.0.0.1:8788`, directly |
+
+That is also why the shim binds loopback only. A Windows-native shim would not
+be reachable from inside the distro without binding `0.0.0.0`, which would turn
+it into an open relay for anyone on the LAN holding a key of their own.
+
+If the OpenAI4S install ever goes away, this whole WSL layer stops being
+necessary: `shim.py` runs on Windows as-is, a user-level scheduled task can own
+it — no administrator rights, no `wsl -u root` — and the VM keeper, the systemd
+unit and the 30-second supervisor loop all disappear together.
+
 ## Keeping the shim up
 
 Two facts make "just start it" insufficient:
