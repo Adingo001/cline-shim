@@ -1,5 +1,7 @@
 # OpenAI4S launcher (WSL-backed)
 
+**English** | [简体中文](README.zh-CN.md)
+
 Windows entry point for an OpenAI4S install that runs inside WSL, wired to the
 Cline Pass subscription gateway.
 
