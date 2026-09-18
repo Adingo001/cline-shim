@@ -30,54 +30,105 @@ bubblewrap / Seatbelt sandbox backend. `openai4s/platform_support.py` accepts
 only `darwin` and `linux` prefixes and raises `UnsupportedPlatform` on native
 Windows, so the daemon runs in the Ubuntu WSL2 distro.
 
+## OpenAI4S as a systemd service
+
+`openai4s.service` runs the daemon and web UI on `127.0.0.1:8760`:
+
+```ini
+[Unit]
+Description=OpenAI4S daemon and web UI (127.0.0.1:8760)
+Wants=cline-shim-tunnel.service
+After=cline-shim-tunnel.service network.target
+
+[Service]
+Type=simple
+User=<user>
+WorkingDirectory=/home/<user>/openai4s
+ExecStart=/home/<user>/openai4s/.venv/bin/openai4s serve --no-open
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target
+```
+
+Three choices worth stating:
+
+- **No `--detached`.** `Type=simple` has to own the process, and `--detached`
+  forks and leaves systemd watching a parent that exits.
+- **`--no-open`.** There is no session for a browser launch at boot.
+- **No `EnvironmentFile`.** `openai4s/config.py::_load_dotenv()` walks up from
+  its own location to the repo root and loads `~/openai4s/.env` without
+  overriding anything already in the environment, so the unit needs no help.
+
 The distro also carries the forward to the relay's shim, as
-`cline-shim-tunnel.service`. That is an ordinary systemd unit, so it comes back
-with the distro and needs no supervisor of its own.
+`cline-shim-tunnel.service`. Both are ordinary enabled units, so they are
+reached only when the distro is running — which is the subject of the next
+section.
 
-## Why a scheduled task, and whether it is still needed
+## Keeping the distro — and everything in it — up
 
-The `Cline shim` task that `install-autostart.ps1` registers runs
-`wsl.exe -d Ubuntu -- sleep infinity` on logon. It was written to hold the
-distro up, on the reasoning that WSL2 tears its VM down once no `wsl.exe` client
-is attached — default `vmIdleTimeout` 60 seconds — killing every process inside,
-including a `serve --detached` daemon. A keep-alive child started with
-`Start-Process` would not survive, since it dies with the launching PowerShell;
-owned by Task Scheduler, the client outlives every shell the launcher opens.
-
-**That reasoning no longer holds here, and the keep-alive holds nothing up.**
-Measured: the keep-alive process was killed and the machine left alone for 100
-seconds. The distro stayed up (`PID 1 = systemd`, `systemctl is-system-running`
-reported `running`), the tunnel unit stayed `active`, and the distro's
-`127.0.0.1:8788` still answered `/health` with 200.
-
-The cause is `/etc/wsl.conf`:
+`/etc/wsl.conf` enables systemd:
 
 ```ini
 [boot]
 systemd=true
 ```
 
-With systemd as PID 1 a process always exists in the distro, so the idle
-teardown the task was written against never fires. The 60-second behaviour
-belongs to a distro **without** systemd, where the last `wsl.exe` client exiting
-really does end the session.
+That makes PID 1 `systemd` inside the distro, which is what lets the units above
+be ordinary `enabled` services. It does **not** keep the distro alive.
 
-That leaves the task's **logon trigger**, which starts the distro after a
-Windows reboot. That is optional too:
+An earlier revision of this page claimed systemd was sufficient, on the strength
+of a 100-second observation. **That claim was wrong**, and the way it failed is
+worth recording: the distro had in fact stopped, and the next `wsl.exe` call
+gave it away by reporting `up 0 minutes` — it had to boot the distro again from
+scratch. WSL2 tears a distro down once no `wsl.exe` client is attached and it
+has been idle, and a running systemd inside does not prevent that, because the
+whole VM goes away.
 
-- **dsh** runs on Windows and reaches the relay through its own tunnel. It never
-  touches the distro.
-- **OpenAI4S** is launched by `./start.sh` from a shell, which starts the distro
-  on demand; `cline-shim-tunnel.service` is `enabled`, so systemd brings the
-  forward up along with it.
+So something on the Windows side has to hold a client attached. Two approaches
+were tried and only one works:
 
-Removing the task therefore costs nothing on this install; it is kept only
-because a distro already running at logon makes the first OpenAI4S launch
-marginally faster.
+| Approach | Result |
+| --- | --- |
+| `Start-Process wsl.exe -d Ubuntu -- sleep infinity` | **fails** — the client is torn down with the launching shell, which removes the last attached client and triggers the very shutdown it was meant to prevent |
+| a supervisor that owns the client and restarts it | **works** — the client outlives every shell, and a teardown is recovered automatically |
 
-The task stays deliberately separate from OpenAI4S's own launcher, which
-unregistered its `OpenAI4S keepalive` task on `stop`; this one has to survive
-that.
+`wsl-keepalive.ps1` is that supervisor. It holds one
+`wsl.exe -d Ubuntu -- sleep infinity` client, probes `127.0.0.1:8760` every 30
+seconds, and recycles the distro after three consecutive misses. A per-distro
+mutex keeps a logon shortcut and a manual run from fighting over restarts.
+
+Measured, with the supervisor in place and `wsl --shutdown` used to tear the
+distro down underneath it:
+
+```
+23:20:18 supervisor start for distro Ubuntu
+23:20:18 wsl.exe started (pid 852)
+23:20:48 wsl.exe exited; retrying in 10s
+23:20:59 wsl.exe started (pid 23240)
+```
+
+The distro came back on its own, and with it both units — `active`, with 8760
+answering (401, token required) and 8788 returning 200 at `pin_mode: strict`.
+
+## Two Startup entries, for two independent consumers
+
+A cold boot has to leave **both** consumers working, and they do not depend on
+each other:
+
+| File in `Startup` | Launches | Serves |
+| --- | --- | --- |
+| `cline-shim-tunnel.vbs` | `tunnel-shim.ps1` | dsh, on Windows, via `127.0.0.1:8789` |
+| `wsl-keepalive.vbs` | `wsl-keepalive.ps1` | WSL itself, so the distro's units can run |
+
+Removing the second costs dsh nothing — dsh never touches the distro. It costs
+the OpenAI4S side everything: with no client attached the distro stops, taking
+`openai4s.service` and `cline-shim-tunnel.service` with it.
+
+The Startup folder is used rather than Task Scheduler because
+`schtasks /create /sc onlogon` needs administrator rights and this account has
+none; the Startup folder is per-user and needs no elevation.
 
 ## Environment selection
 
