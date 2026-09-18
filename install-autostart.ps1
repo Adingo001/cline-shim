@@ -252,4 +252,4 @@ foreach ($target in @(@{ Name = 'dsh tunnel'; Url = "http://127.0.0.1:$LocalPort
     }
 }
 Write-Host ""
-Write-Host "autostart: installed. A cold boot now leaves both consumers usable."
+Write-Host 'autostart: installed. Opening either application now brings up its stack.'
