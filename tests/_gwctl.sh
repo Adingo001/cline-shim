@@ -8,7 +8,7 @@
 # to observe request size -- the variable that actually governs throughput on
 # this route -- and to terminate the Anthropic wire locally.
 #
-# Measured on this route (tests/_probe36.py, cline_dsflash, max_tokens 400):
+# Measured on this route (local probe, cline_dsflash, max_tokens 400):
 #   input  3k -> 79.9 tps, ttfb  2.27s
 #   input 34k -> 68.2 tps, ttfb  5.25s
 #   input 68k -> 28.7 tps, ttfb  7.93s

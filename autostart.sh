@@ -4,13 +4,13 @@
 # Two things have to happen at once, and they are why this is a loop rather
 # than a one-shot start:
 #
-#   1. the shim has to be running -- dsh and OpenAI4S both reach it at
-#      127.0.0.1:8788, and dsh has no fallback, so a dead shim is a dead editor;
+#   1. the shim has to be running -- dsh reaches it at 127.0.0.1:8788 and has
+#      no fallback, so a dead shim is a dead editor;
 #   2. the WSL2 VM has to stay up. WSL2 tears the VM down once no wsl.exe
 #      client is attached, and that takes the shim with it.
 #
-# This process is owned by the `Cline shim` scheduled task, so it outlives
-# every shell the launcher opens, and the task re-creates it at logon.
+# systemd owns this process (cline-shim.service, Restart=always), so it outlives
+# every shell a user opens and comes back within seconds if it dies.
 set -u
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 

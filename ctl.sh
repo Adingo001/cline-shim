@@ -3,7 +3,7 @@
 #
 #   ctl.sh start | stop | restart | status
 #
-# The shim repairs four things OpenAI4S cannot handle on its own: the
+# The shim repairs four things a plain client cannot handle on its own: the
 # {"data": {...}} response envelope, the `reasoning` field name, bare model
 # ids, and transient HTTP 500 routing misses.
 set -u

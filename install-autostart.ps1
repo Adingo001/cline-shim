@@ -1,7 +1,10 @@
-# Register (or remove) the two layers that keep the Cline shim running.
+# Install (or remove) the Cline Pass shim and the two layers that keep it up.
 #
 #   powershell -ExecutionPolicy Bypass -File install-autostart.ps1
 #   powershell -ExecutionPolicy Bypass -File install-autostart.ps1 -Remove
+#
+# This is the only entry point. It copies the shim into the distro, installs the
+# systemd unit, and registers the scheduled task -- nothing else has to be run.
 #
 # Two failure modes need two owners:
 #
@@ -18,8 +21,10 @@
 # worked, but it made the task a second manager of the shim and collided with
 # the unit. The task now owns only the VM; systemd owns the shim.
 #
-# Deliberately independent of `OpenAI4S keepalive`: `openai4s.cmd stop`
-# unregisters that one, while this is a machine-level setting that survives it.
+# Files travel over the \\wsl.localhost share instead of through wsl.exe
+# arguments: shim.py base64-encodes well past 32k, which is the Windows
+# command-line ceiling, so the argument route silently truncates the largest
+# file. A UNC write has no such limit and needs no quoting.
 #
 # The task runs as the current user, interactive. WSL distros are per-user, so
 # a SYSTEM or boot-triggered task would not see this distro at all.
@@ -33,6 +38,7 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
+$SrcDir = $PSScriptRoot
 
 # Both defaults are resolved from the distro so this script carries no
 # username and works on any machine. wsl.exe output can come back NUL-padded.
@@ -42,6 +48,9 @@ if (-not $InstallRoot) { $InstallRoot = "$HomeDir/openai4s-shim" }
 
 $UnitName = 'cline-shim.service'
 $UnitPath = "/etc/systemd/system/$UnitName"
+
+# The distro is reachable as a UNC share; /home/x/y becomes \home\x\y there.
+$UncRoot = "\\wsl.localhost\$Distro" + ($InstallRoot -replace '/', '\')
 
 $UnitText = @"
 [Unit]
@@ -80,8 +89,35 @@ if ($Remove) {
     Unregister-ScheduledTask -TaskName $TaskName -Confirm:$false -ErrorAction SilentlyContinue
     Invoke-Wsl -AsRoot -Command "systemctl disable --now $UnitName 2>/dev/null; rm -f $UnitPath; systemctl daemon-reload"
     Write-Host "autostart: removed task '$TaskName' and unit '$UnitName'"
+    Write-Host "autostart: $InstallRoot was left on disk -- delete it yourself if you want it gone"
     return
 }
+
+# --- layer 0: put the shim where the unit will look for it -------------------
+New-Item -ItemType Directory -Force -Path $UncRoot | Out-Null
+
+# The checkers live under tests/ in the checkout but are invoked from
+# $InstallRoot, so their destination paths are flattened.
+$payload = [ordered]@{
+    'shim.py'             = 'shim.py'
+    'ctl.sh'              = 'ctl.sh'
+    'autostart.sh'        = 'autostart.sh'
+    'tests\_verify.sh'    = '_verify.sh'
+    'tests\_diag.sh'      = '_diag.sh'
+    'tests\_heal_test.sh' = '_heal_test.sh'
+}
+
+foreach ($src in $payload.Keys) {
+    $from = Join-Path $SrcDir $src
+    if (-not (Test-Path $from)) { throw "missing source file: $from" }
+    Copy-Item -Path $from -Destination (Join-Path $UncRoot $payload[$src]) -Force
+}
+Write-Host "autostart: pushed $($payload.Count) files -> $InstallRoot"
+
+# A CRLF checkout would break every shell script and the shebang line on the
+# Linux side, so strip stray carriage returns and set the exec bits.
+Invoke-Wsl -Command "cd $InstallRoot && sed -i 's/\r$//' shim.py ctl.sh autostart.sh _verify.sh _diag.sh _heal_test.sh && chmod +x ctl.sh autostart.sh _verify.sh _diag.sh _heal_test.sh" | Out-Null
+Write-Host "autostart: normalised line endings, set exec bits"
 
 # --- layer 1: systemd owns the shim -----------------------------------------
 $encoded = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($UnitText))
@@ -108,5 +144,5 @@ Register-ScheduledTask -TaskName $TaskName -Action $action -Trigger $trigger `
 Start-ScheduledTask -TaskName $TaskName
 
 Start-Sleep -Seconds 8
-Invoke-Wsl -AsRoot -Command "bash $InstallRoot/_verify.sh" 
+Invoke-Wsl -AsRoot -Command "bash $InstallRoot/_verify.sh"
 Write-Host "autostart: task '$TaskName' registered (resident VM keeper) + unit '$UnitName' enabled"

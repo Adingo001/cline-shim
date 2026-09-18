@@ -17,6 +17,10 @@ SESSION-*.md
 # Superseded by install-autostart.ps1, which installs both layers at once.
 tests/_install_service.py
 
+# The OpenAI4S-side launcher and its patches. Kept on disk for the other
+# install that still uses them, deliberately out of this repository.
+_legacy/
+
 # Runtime artifacts.
 *.log
 *.pid
