@@ -206,14 +206,22 @@ parasail, alibaba, runware, boundless, gmicloud`：测量时干净应答的那�
 
 | shim 跑在 | dsh 怎么到达 | OpenAI4S 怎么到达 |
 | --- | --- | --- |
+| Windows 上 | 直连 —— `local-shim.ps1` 搭的就是这条 | 需要 SSH 隧道，否则到不了 |
 | Linux 中转服务器 | Windows 侧的 SSH 隧道 | 发行版内部的 SSH 隧道 |
 | 发行版内 | 经 WSL2 的 localhost 转发 | 同一发行版内，直连 |
-| Windows 上 | 直连 | 需要 SSH 隧道，否则到不了 |
+
+**dsh 走的是第一行。** 它是个 Windows 应用，而 `shim.py` 只用标准库，所以中转
+服务器和 SSH 隧道对 dsh 从来就不是必需的 —— 那套东西是从围绕 OpenAI4S 的部署里
+继承下来的。`local-shim.ps1` 把 shim 常驻在本地，`dsh.ps1` 在打开应用前调它，
+因此登录时什么都不用跑。
+
+之所以留着 shim 而不是让 dsh 直连网关：钉住上游渠道、以及渠道返回空响应时的
+故障转移，都是 shim 在做。实测有一轮是 `[togetherai!] empty -> next channel`，
+1.9 秒后由 novita 服务。直连没有这种恢复能力。
 
 之所以还需要一个发行版，是因为 **OpenAI4S** 要求 Linux
 （`start_new_session=True`、带精确 `SIGINT` 的 per-cell 进程组、bubblewrap
-沙箱后端），**不是**因为 shim 要求。把 OpenAI4S 拿掉，剩下两行任选其一即可，
-整层 WSL 会随之消失。
+沙箱后端），**不是**因为 shim 要求。如今 OpenAI4S 是 WSL 这一层存在的唯一理由。
 
 只绑回环不是附带选择。绑到 `0.0.0.0` 的 shim 就是一个开放中继 —— 局域网里
 任何自带 key 的人都能用。

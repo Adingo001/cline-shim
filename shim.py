@@ -699,6 +699,30 @@ def discover_channels(model, key):
     return [name for name in names if re.fullmatch(r"[a-z0-9][a-z0-9-]*", name)]
 
 
+def upstream_path(path):
+    """Join a caller's path onto UPSTREAM without duplicating its /v1.
+
+    ``UPSTREAM`` already ends in ``/v1``, so a caller that follows the OpenAI
+    convention and asks for ``/v1/chat/completions`` was forwarded to
+    ``/api/v1/v1/chat/completions``. That 404s on every channel, and because a
+    missing path and a bad join 404 identically, the failover read one bad join
+    as "eight bad channels" -- which is what made a working relay look broken.
+    Which version prefix the caller writes is the caller's business; the hop to
+    the upstream is ours, so it is dropped here.
+    """
+    split = urlsplit(path)
+    sub = split.path
+    if sub.startswith("/v1/"):
+        sub = sub[3:]
+    elif sub.startswith("/api/v1/"):
+        sub = sub[7:]
+    elif sub.rstrip("/") in ("/v1", "/api/v1"):
+        sub = "/"
+    if not sub.startswith("/"):
+        sub = "/" + sub
+    return sub + (("?" + split.query) if split.query else "")
+
+
 # --------------------------------------------------------------------------
 # HTTP
 # --------------------------------------------------------------------------
@@ -844,7 +868,7 @@ class Handler(BaseHTTPRequestHandler):
                 try:
                     status, note = self._attempt(
                         "/chat/completions" if base == "anthropic" else path,
-                        body, headers, stream, label, base)
+                        body, headers, stream, label, base, method)
                 except urllib.error.HTTPError as exc:
                     status = exc.code
                     note = exc.read().decode("utf-8", "replace")
@@ -880,16 +904,17 @@ class Handler(BaseHTTPRequestHandler):
             min(index + 1, len(attempts))))
         self._send_json(final_status(status), normalize_error(status, note))
 
-    def _attempt(self, path, body, headers, stream, label, base="openai"):
+    def _attempt(self, path, body, headers, stream, label, base="openai",
+                 method="POST"):
         """Run one attempt against one channel.
 
         Returns ``(0, channel)`` once the reply has been handed to the client,
         or ``(status, note)`` when this channel failed before the first token.
         """
         req = urllib.request.Request(
-            UPSTREAM + path, data=body or None,
+            UPSTREAM + upstream_path(path), data=body or None,
             headers=dict(headers, **{"Content-Length": str(len(body))}),
-            method="POST")
+            method=method)
         started = time.time()
         try:
             resp = urllib.request.urlopen(req, timeout=TIMEOUT)

@@ -230,14 +230,25 @@ path, not the shim, is what determines the deployment shape:
 
 | Shim runs on | dsh reaches it via | OpenAI4S reaches it via |
 | --- | --- | --- |
+| Windows | directly — this is what `local-shim.ps1` sets up | an SSH tunnel, or it is not reachable |
 | a Linux relay | an SSH tunnel from Windows | an SSH tunnel from inside the distro |
 | inside the distro | WSL2 localhost forwarding | directly, same distro |
-| Windows | directly | an SSH tunnel, or it is not reachable |
+
+**dsh uses the first row.** It is a Windows application and `shim.py` is
+stdlib-only Python, so the relay and the ssh tunnel were never needed for it —
+they were inherited from a layout built around OpenAI4S. `local-shim.ps1` keeps
+the shim running on this machine and `dsh.ps1` calls it before opening the app,
+so nothing has to run at logon.
+
+The shim is kept rather than pointing dsh straight at the gateway because it is
+what pins the upstream channel and fails over when one returns an empty
+response: measured, one round went `[togetherai!] empty -> next channel` and was
+served by novita 1.9s later. A direct connection has no such recovery.
 
 A distro is needed at all because **OpenAI4S** requires Linux
 (`start_new_session=True`, a per-cell process group with exact `SIGINT`, a
-bubblewrap sandbox backend), not because the shim does. Remove OpenAI4S from
-the picture and either remaining row works, taking the whole WSL layer with it.
+bubblewrap sandbox backend), not because the shim does. OpenAI4S is now the only
+reason any of the WSL layer exists.
 
 Binding loopback is not incidental. A shim bound to `0.0.0.0` would be an open
 relay for anyone on the LAN holding a key of their own.
