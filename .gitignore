@@ -23,6 +23,10 @@ _legacy/
 
 # Runtime artifacts.
 *.log
+# The supervisor records the shim's stdout and stderr side by side, and rotates
+# them with a timestamp suffix -- neither name ends in .log, so *.log misses them
+# and they landed in a commit before this rule existed.
+*.log.*
 *.pid
 __pycache__/
 *.pyc
