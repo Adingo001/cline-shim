@@ -80,6 +80,9 @@ and fails over to the next channel.
 Configuration (environment):
     CLINE_UPSTREAM       default https://api.cline.bot/api/v1
     CLINE_SHIM_PORT      default 8788
+    CLINE_SHIM_BIND      default 127.0.0.1; set 0.0.0.0 when the caller runs
+                         inside a container (it reaches the host through the
+                         docker0 gateway, not through the host's loopback)
     CLINE_SHIM_TIMEOUT   default 600 (seconds, whole request)
     CLINE_SHIM_RETRIES   default 2  (tries per channel on a transport error)
     CLINE_SHIM_LOG       default 1  (set 0 to silence per-request lines)
@@ -102,6 +105,12 @@ from urllib.parse import parse_qs, urlsplit
 
 UPSTREAM = os.environ.get("CLINE_UPSTREAM", "https://api.cline.bot/api/v1").rstrip("/")
 PORT = int(os.environ.get("CLINE_SHIM_PORT", "8788"))
+# Loopback by default: this is a key-holding proxy and an open one would be a
+# free relay for anyone who can reach the port. It is configurable because a
+# caller inside a container cannot reach the host's loopback -- Docker maps
+# host.docker.internal to the docker0 gateway (172.17.0.1), so a container-side
+# consumer needs the shim on 0.0.0.0.
+BIND = os.environ.get("CLINE_SHIM_BIND", "127.0.0.1").strip() or "127.0.0.1"
 TIMEOUT = float(os.environ.get("CLINE_SHIM_TIMEOUT", "600"))
 RETRIES = max(1, int(os.environ.get("CLINE_SHIM_RETRIES", "2")))
 LOG_ON = os.environ.get("CLINE_SHIM_LOG", "1") not in ("0", "false", "no", "off")
@@ -1447,10 +1456,10 @@ def provider_of_choice(choices):
 
 
 def main():
-    server = ThreadingHTTPServer(("127.0.0.1", PORT), Handler)
+    server = ThreadingHTTPServer((BIND, PORT), Handler)
     server.daemon_threads = True
-    log("listening on http://127.0.0.1:%d -> %s (retries=%d, pin=%s%s)" % (
-        PORT, UPSTREAM, RETRIES,
+    log("listening on http://%s:%d -> %s (retries=%d, pin=%s%s)" % (
+        BIND, PORT, UPSTREAM, RETRIES,
         PIN_MODE if PIN_MODE in ("preferred", "strict") else "off",
         (" exclude=" + ",".join(sorted(EXCLUDE))) if EXCLUDE else ""))
     try:

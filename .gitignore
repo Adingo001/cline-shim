@@ -33,3 +33,7 @@ __pycache__/
 
 # Editorial backups.
 *.bak
+
+# Shim stdout captured while testing CLINE_SHIM_BIND; the analyzer's name, not a keeper.
+_bt.err
+*.err
